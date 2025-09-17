@@ -17,6 +17,10 @@ use sl_mpc_mate::message::*;
 
 pub use sl_mpc_mate::{coord::*, message::MESSAGE_HEADER_SIZE};
 
+pub mod mqtt_relayer;
+pub use mqtt_relayer::MqttMessageRelayService;
+pub use mqtt_relayer::MqttMessageRelay;
+
 struct Expire(Instant, MsgId, Kind);
 
 impl PartialEq for Expire {

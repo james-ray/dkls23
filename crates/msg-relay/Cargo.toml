@@ -8,6 +8,10 @@ license-file ="../../LICENSE"
 tracing = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 sl-mpc-mate = { workspace = true }
+log = "0.4.28"
+rumqttc = { version = "0.24.0" }
+futures-util = "0.3.31"
+hex = "0.4.3"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "sync", "macros" ] }

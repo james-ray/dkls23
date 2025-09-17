@@ -43,6 +43,7 @@ x25519-dalek = { workspace = true, features = ["reusable_secrets", "zeroize"] }
 aead.workspace = true
 chacha20 = { version = "0.9" }
 chacha20poly1305 = { version = "0.10.1" }
+msg-relay = { workspace = true }
 
 [dev-dependencies]
 hex = "0.4.3"
@@ -79,3 +80,4 @@ sl-oblivious = "1.0.0-beta"
 
 x25519-dalek = { version = "2.0.0" }
 signature = { version = "2.2.0" }
+msg-relay = { path = "crates/msg-relay" }

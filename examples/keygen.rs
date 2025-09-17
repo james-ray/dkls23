@@ -1,9 +1,13 @@
+// examples/keygen.rs
 use k256::elliptic_curve::group::GroupEncoding;
 use rand::Rng;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use sl_dkls23::keygen::run as keygen_run;
 use std::sync::Arc;
+
+// 使用新的MqttMessageRelayService
+use msg_relay::MqttMessageRelayService;
 
 mod common;
 
@@ -12,61 +16,76 @@ pub async fn main() {
     let t: u8 = 2;
     let n: u8 = 3;
 
-    // Logic: The relayer follows the Actor model: It spawns from the caller task, does the assigned task
-    // independently and return the result in the main task. For the purpose of that example there is no real
-    // networking, but instead a combination of shared state between rust tasks and message channel passing where
-    // receiver and sender channels are interleaved for p2p and broadcast communication. That is a SimpleMessageRelay.
-    // In a real setup the relayer can be an independent network entity, where all the nodes can talk to. It
-    // can be implemented with a variety of existing  networking protocols such as websockets; as long as it follows the
-    // underlying pull logic : Each receiver knows what message to subscribe for and so it asks the relayer to deliver it
-    // as long as it arrives from the expected sender.
-    // Rust: SimpleMessageRelay::new() creates an Arc<Mutex> object to be shared among all tasks. The objects does message
-    // accounting in hashmap : messages: HashMap<MsgId, MsgEntry>
-    let coord = sl_mpc_mate::coord::SimpleMessageRelay::new();
+    println!("Connecting to MQTT broker...");
 
-    // Here the parties are simulated as in a real world example but locally as a set of rust async tasks:
-    // One task for each node to run the dkls23 ecdsa keygen algorithm
     let mut parties = tokio::task::JoinSet::new();
 
-    // For each node in the protocol a setup msg should be created tailored for that keygen protocol. The setupmsg
-    // contains information about the public parameters of the protocol: number of nodes = n, minimum threshold = t dictating
-    // the minimum required nodes that need to be online in order to compute the distributed signature, a unique instance id for the keygen protocol
-    // a unique id that identifies that key share id that will be created common for all nodes in order to distinguish from
-    // other key shares that will be potentially created, the public signature keys of each other node in order to
-    // verify authenticity and integrity of p2p and broadcast messages, and the secret signing key of the node boostraping the protocol which is
-    // unique and different per node.
-    for setup in common::shared::setup_keygen(t, n, None) {
+    for (i, setup) in common::shared::setup_keygen(t, n, None).into_iter().enumerate() {
         parties.spawn({
-            // Each task representing a different node is "connecting" to the coordinator relayer: a new mpsc channel is created
-            // in a new per node relay, whereby each relay shares the same  Arc<Mutex> messages object which has been created outside the loop
-            let relay = coord.connect();
-            // At that point we have created the correct setup msgs for each party with the aforementioned helper function, which
-            // in real world does not exist but the consumers of the library node should create. The next step is to execute each
-            // task in an async fashion. That function in a real world example runs by each node independently.
-            let mut rng = ChaCha20Rng::from_entropy();
-            keygen_run(setup, rng.gen(), relay)
+            async move {
+                // 为每个参与方创建独立的MQTT服务实例
+                let client_id = format!("dkls23-keygen-party-{}", i);
+                let mqtt_service = MqttMessageRelayService::new(
+                    "localhost",
+                    1883,
+                    &client_id,  // 添加 & 引用
+                    "dkls23"
+                );
+
+                println!("Party {} connecting to MQTT with client_id: {}", i, mqtt_service.client_id());  // 使用访问方法
+
+                match mqtt_service.connect().await {
+                    Ok(relay) => {  // 使用 Ok
+                        println!("Party {} connected successfully", i);
+                        let mut rng = ChaCha20Rng::from_entropy();
+                        keygen_run(setup, rng.gen(), relay).await
+                    }
+                    Err(err) => {  // 使用 Err
+                        eprintln!("Party {} failed to connect to MQTT broker, err {}", i, err);
+                        Err(sl_dkls23::keygen::types::KeygenError::AbortProtocol(2))
+                    }
+                }
+            }
         });
     }
 
-    // Here we create a vector to consolidate all the created key shares from the keygen protocol.
-    // In a real world each node receives each secret keyshare and nothing else
     let mut shares = vec![];
+    let mut successful_parties = 0;
 
-    // After all the tasks have finished we extract the  key share per node and store it
-    // in the shares vector in order to later test that they all agree on the public key
-    while let Some(fini) = parties.join_next().await {
-        if let Err(ref err) = fini {
-            println!("error {err:?}");
-        } else {
-            match fini.unwrap() {
-                Err(err) => panic!("err {:?}", err),
-                Ok(share) => shares.push(Arc::new(share)),
+    while let Some(result) = parties.join_next().await {
+        match result {
+            Ok(Ok(share)) => {
+                shares.push(Arc::new(share));
+                successful_parties += 1;
+                println!("Party completed successfully (total: {})", successful_parties);
+            }
+            Ok(Err(err)) => {
+                eprintln!("Party failed with error: {:?}", err);
+            }
+            Err(join_err) => {
+                eprintln!("Party task panicked: {:?}", join_err);
             }
         }
     }
 
-    //print the common public key created from each user key share
-    for keyshare in shares.iter() {
-        println!("PK{}", hex::encode(keyshare.public_key().to_bytes()));
+    // 打印公钥
+    println!("\nGenerated public keys:");
+    for (i, keyshare) in shares.iter().enumerate() {
+        let pk_bytes = keyshare.public_key().to_bytes();
+        println!("Party {} PK: {}", i, hex::encode(&pk_bytes));
+
+        // 验证所有公钥是否相同
+        if i > 0 {
+            let first_pk = shares[0].public_key().to_bytes();
+            if pk_bytes != first_pk {
+                eprintln!("ERROR: Public key mismatch between party 0 and party {}", i);
+            }
+        }
+    }
+
+    if successful_parties >= t as usize {
+        println!("\n✅ Key generation successful! {} parties completed.", successful_parties);
+    } else {
+        println!("\n❌ Key generation failed. Only {} parties completed, need at least {}.", successful_parties, t);
     }
 }
