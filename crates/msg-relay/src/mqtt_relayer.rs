@@ -20,6 +20,7 @@ use sl_mpc_mate::message::{AskMsg, MsgHdr, MsgId, MESSAGE_HEADER_SIZE};
 pub struct MqttMessageRelay {
     rx: mpsc::Receiver<Vec<u8>>,
     client: AsyncClient,
+    client_id: String,
     topic_prefix: String,
 }
 
@@ -49,7 +50,7 @@ impl Sink<Vec<u8>> for MqttMessageRelay {
         item: Vec<u8>,
     ) -> Result<(), Self::Error> {
         let this = self.get_mut();
-
+        let client_id = this.client_id.clone();
         // 直接发布到MQTT，不进行复杂的消息存储
         if let Ok(hdr) = item.as_slice().try_into() {
             let hdr: &MsgHdr = hdr;
@@ -61,10 +62,10 @@ impl Sink<Vec<u8>> for MqttMessageRelay {
                 let message = item.clone();
 
                 tokio::spawn(async move {
-                    if let Err(e) = client.publish(&topic, QoS::ExactlyOnce, false, message).await {
-                        error!("Failed to publish message to MQTT: {}", e);
+                    if let Err(e) = client.publish(&topic, QoS::ExactlyOnce, true, message).await {
+                        println!("client_id {} Failed to publish message to MQTT: {}",  client_id, e);
                     } else {
-                        println!("Message published to topic: {}", topic);
+                        println!("client_id {}  Message published to topic: {}", client_id, topic);
                     }
                 });
             }
@@ -123,7 +124,7 @@ impl MqttMessageRelayService {
         mqtt_options.set_keep_alive(std::time::Duration::from_secs(30))
             .set_max_packet_size(10 * 1024 * 1024, 10 * 1024 * 1024)
             .set_clean_session(true);
-        
+
         Self {
             mqtt_options,
             topic_prefix: topic_prefix.into(),
@@ -134,8 +135,10 @@ impl MqttMessageRelayService {
         self.mqtt_options.client_id()
     }
     pub async fn connect(&self) -> Result<MqttMessageRelay, Box<dyn std::error::Error + Send + Sync>> {
-        let (client, mut eventloop) = AsyncClient::new(self.mqtt_options.clone(), 100);
-        let (tx, rx) = mpsc::channel(100);
+        let client_id = self.client_id();
+        let client_id_clone = client_id.clone();
+        let (client, mut eventloop) = AsyncClient::new(self.mqtt_options.clone(), 1000);
+        let (tx, rx) = mpsc::channel(1000);
 
         let topic_prefix = self.topic_prefix.clone();
 
@@ -149,7 +152,7 @@ impl MqttMessageRelayService {
             loop {
                 match eventloop.poll().await {
                     Ok(Event::Incoming(Incoming::Publish(publish))) => {
-                        println!("Received MQTT message on topic: {}", publish.topic);
+                        println!("client_id {} Received MQTT message on topic: {}", client_id, publish.topic);
                         if let Err(e) = tx.send(publish.payload.to_vec()).await {
                             println!("Failed to forward message: {}", e);
                             // 不要break，继续处理
@@ -172,6 +175,7 @@ impl MqttMessageRelayService {
         Ok(MqttMessageRelay {
             rx,
             client,
+            client_id: client_id_clone,
             topic_prefix: self.topic_prefix.clone(),
         })
     }

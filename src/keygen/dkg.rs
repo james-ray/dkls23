@@ -188,6 +188,8 @@ where
     let my_party_id = setup.participant_index() as u8;
     let my_rank = setup.participant_rank(my_party_id as usize);
 
+    println!("keygen run_inner, my_party_id {}", my_party_id);
+
     if let Some(v) = key_refresh_data {
         let cond1 = v.expected_public_key == ProjectivePoint::IDENTITY;
         let cond2 = v.lost_keyshare_party_ids.len() > (N - T);
@@ -234,6 +236,8 @@ where
     relay.ask_messages(&setup, DKG_MSG_R3, true).await?;
     relay.ask_messages(&setup, DKG_MSG_R4, false).await?;
 
+    println!("after ask_messages, my_party_id {}", my_party_id);
+
     let (sid_i_list, commitment_list, x_i_list, enc_pub_key) = broadcast_4(
         &setup,
         relay,
@@ -242,13 +246,16 @@ where
     )
     .await?;
 
+    println!("after broadcast DKG_MSG_R1, my_party_id {}", my_party_id);
     for (receiver, pub_key) in enc_pub_key.into_iter().enumerate() {
         if receiver != setup.participant_index() {
+            println!("before receiver_public_key, my_party_id {}, receiver {} setup.participant_index() {}", my_party_id, receiver, setup.participant_index() );
             scheme
                 .receiver_public_key(receiver, &pub_key)
                 .map_err(|_| KeygenError::InvalidMessage)?;
         }
     }
+    println!("after receive pub_key, my_party_id {}", my_party_id);
 
     // Check that x_i_list contains unique elements.
     // N is small and following loops doesn't  allocate.
@@ -292,6 +299,7 @@ where
 
     let mut base_ot_receivers: Pairs<EndemicOTReceiver> = Pairs::new();
 
+    println!("before send ot1msg, my_party_id {}", my_party_id);
     for receiver_id in setup.all_other_parties() {
         let sid = get_base_ot_session_id(
             my_party_id,
@@ -328,6 +336,7 @@ where
 
     #[cfg(feature = "tracing")]
     tracing::debug!("feed all OT1");
+    println!("feed all OT1, my_party_id {}", my_party_id);
 
     // generate chain_code_sid for root_chain_code or use already existed from key_refresh_data
     let chain_code_sid = if let Some(v) = key_refresh_data {

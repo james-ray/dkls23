@@ -1,80 +1,98 @@
-use tokio::task::JoinSet;
-
+// examples/sign.rs
+use k256::ecdsa::{RecoveryId, VerifyingKey};
 use rand::Rng;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
-
-use k256::ecdsa::{RecoveryId, VerifyingKey};
-
 use sl_dkls23::sign;
-use sl_mpc_mate::coord::SimpleMessageRelay;
+use tokio::task::JoinSet;
+
+// 使用新的MqttMessageRelayService
+use msg_relay::MqttMessageRelayService;
 
 mod common;
 
 #[tokio::main]
 async fn main() {
-    // Logic: The relayer follows the Actor model: It spawns from the caller task, does the assigned task
-    // independently and return the result in the main task. For the purpose of that example there is no real
-    // networking, but instead a combination of shared state between rust tasks and message channel passing where
-    // receiver and sender channels are interleaved for p2p and broadcast communication. That is a SimpleMessageRelay. async
-    // In a real setup the relayer can be an independent network entity, where all the nodes can talk to. It
-    // can be implemented with a variety of existing  networking protocols such as websockets; as long as it follows the
-    // underlying pull logic : Each receiver knows what message to subscribe for and so it asks the relayer to deliver it
-    // as long as it arrives from the expected sender.
-    // Rust: SimpleMessageRelay::new() creates an Arc<Mutex> object to be shared among all tasks. The objects does message
-    // accounting in hashmap : messages: HashMap<MsgId, MsgEntry>
-    let coord = SimpleMessageRelay::new();
-
-    // We locally generate some key shares in order to test the signing procedure.
+    // 我们本地生成一些密钥共享来测试签名过程
     let shares = common::shared::gen_keyshares(2, 3).await;
 
-    //fetch the public verification key from one of the keyshares
+    // 从其中一个密钥共享获取公共验证密钥
     let vk = VerifyingKey::from_affine(shares[0].public_key().to_affine())
         .unwrap();
 
-    //define a chain path for the signature: m is the default one
+    // 定义签名的链路径：m 是默认路径
     let chain_path = "m";
 
-    // Here the parties are simulated as in a real world example but locally as a set of rust async tasks:
-    // One task for each node to run the dkls23 ecdsa sign algorithm
+    // 在这里，参与方被模拟为真实世界的例子，但在本地作为一组 Rust 异步任务运行：
+    // 每个节点一个任务来运行 dkls23 ecdsa 签名算法
     let mut parties = JoinSet::new();
 
-    // For each node in the protocol a setup msg should be created tailored for that sign protocol. The setupmsg
-    // contains information about the public parameters of the protocol: number of nodes = n, minimum threshold = t dictating
-    // the minimum required nodes that need to be online in order to compute the distributed signature, a unique instance id for the sign protocol
-    // a unique id that identifies that key share id that will be created common for all nodes in order to distinguish from
-    // other key shares that will be potentially created, the public signature keys of each other node in order to
-    // verify authenticity and integrity of p2p and broadcast messages, and the secret signing key of the node boostraping the protocol which is
-    // unique and different per node.
-    for setup in common::shared::setup_dsg(&shares[0..2], chain_path) {
-        let mut rng = ChaCha20Rng::from_entropy();
-        // Each task representing a different node is "connecting" to the coordinator relayer: a new mpsc channel is created
-        // in a new per node relay, whereby each relay shares the same  Arc<Mutex> messages object which has been created outside the loop
-        let relay = coord.connect();
+    println!("Connecting to MQTT broker for signing...");
 
-        // At that point we have created the correct setup msgs for each party with the aforementioned helper function, which
-        // in real world does not exist but the consumers of the library node should create. The next step is to execute each
-        // task in an async fashion. That function in a real world example runs by each node independently who want to compute the final
-        // signature.
-        parties.spawn(sign::run(setup, rng.gen(), relay));
+    for (i, setup) in common::shared::setup_dsg(&shares[0..2], chain_path).into_iter().enumerate() {
+        let mut rng = ChaCha20Rng::from_entropy();
+
+        // 为每个参与方创建独立的MQTT服务实例
+        let client_id = format!("dkls23-sign-party-{}", i);
+        let mqtt_service = MqttMessageRelayService::new(
+            "localhost",
+            1883,
+            &client_id,
+            "dkls23"
+        );
+
+        println!("Signing party {} connecting to MQTT with client_id: {}", i, mqtt_service.client_id());
+
+        parties.spawn(async move {
+            match mqtt_service.connect().await {
+                Ok(relay) => {
+                    println!("Signing party {} connected successfully", i);
+                    match sign::run(setup, rng.gen(), relay).await {
+                        Ok(result) => {
+                            println!("Signing party {} completed successfully", i);
+                            Ok(result)
+                        },
+                        Err(err) => {
+                            eprintln!("Signing party {} failed with error: {:?}", i, err);
+                            Err(err)
+                        }
+                    }
+                }
+                Err(err) => {
+                    eprintln!("Signing party {} failed to connect to MQTT broker, err {}", i, err);
+                    Err(sl_dkls23::sign::types::SignError::AbortProtocol(2))
+                }
+            }
+        });
     }
 
-    // After all the tasks have finished we extract the signature and verify it against the public key
-    while let Some(fini) = parties.join_next().await {
-        let fini = fini.unwrap();
+    let mut successful_signatures = 0;
 
-        if let Err(ref err) = fini {
-            println!("error {err:?}");
+    // 在所有任务完成后，我们提取签名并针对公钥进行验证
+    while let Some(result) = parties.join_next().await {
+        match result {
+            Ok(Ok((sign, recid))) => {
+                successful_signatures += 1;
+
+                let hash = [1u8; 32];
+                let recid2 = RecoveryId::trial_recovery_from_prehash(&vk, &hash, &sign)
+                    .unwrap();
+
+                assert_eq!(recid, recid2);
+                println!("✅ Signature {} verified successfully against public key", successful_signatures);
+            }
+            Ok(Err(err)) => {
+                eprintln!("Signing party failed with error: {:?}", err);
+            }
+            Err(join_err) => {
+                eprintln!("Signing party task panicked: {:?}", join_err);
+            }
         }
+    }
 
-        let (sign, recid) = fini.unwrap();
-
-        let hash = [1u8; 32];
-
-        let recid2 =
-            RecoveryId::trial_recovery_from_prehash(&vk, &hash, &sign)
-                .unwrap();
-
-        assert_eq!(recid, recid2);
+    if successful_signatures > 0 {
+        println!("\n✅ Signing successful! {} signatures generated and verified.", successful_signatures);
+    } else {
+        println!("\n❌ Signing failed. No valid signatures produced.");
     }
 }

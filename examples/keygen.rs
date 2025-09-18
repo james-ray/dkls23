@@ -38,7 +38,16 @@ pub async fn main() {
                     Ok(relay) => {  // 使用 Ok
                         println!("Party {} connected successfully", i);
                         let mut rng = ChaCha20Rng::from_entropy();
-                        keygen_run(setup, rng.gen(), relay).await
+                        match keygen_run(setup, rng.gen(), relay).await{
+                            Ok(share) => {
+                                println!("Party {} completed key generation", i);
+                                Ok(share)
+                            },
+                            Err(err) => {
+                                println!("Party {} key generation failed, err {:?}", i, err);
+                                Err(err)
+                            }
+                        }
                     }
                     Err(err) => {  // 使用 Err
                         eprintln!("Party {} failed to connect to MQTT broker, err {}", i, err);
@@ -72,7 +81,7 @@ pub async fn main() {
     println!("\nGenerated public keys:");
     for (i, keyshare) in shares.iter().enumerate() {
         let pk_bytes = keyshare.public_key().to_bytes();
-        println!("Party {} PK: {}", i, hex::encode(&pk_bytes));
+        println!("Party {} PK: {} si {:?}", i, hex::encode(&pk_bytes), keyshare.s_i());
 
         // 验证所有公钥是否相同
         if i > 0 {

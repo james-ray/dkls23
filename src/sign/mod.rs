@@ -23,7 +23,7 @@
 mod constants;
 mod dsg;
 mod messages;
-mod types;
+pub mod types;
 
 pub use dsg::*;
 pub use types::*;
